@@ -47,7 +47,7 @@ class EfficientADClass(nn.Module):
         self.image_net_data_loader = self.get_images_from_image_net_data_loader()  # noqa: E501
         self.train_loader = train_loader
         self.val_loader = val_loader
-        if self.PDN_size == PDNSIZE.S:
+        if self.PDN_size == PDNSIZE.S: 
             self.pdn_student = PatchDescriptionNetworkSmall(
                 self.input_size, PDNTYPES.S
             ).to('cuda')
