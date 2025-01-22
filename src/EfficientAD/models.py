@@ -227,8 +227,8 @@ class Decoder(nn.Module):
 
     def forward(
             self, x: torch.Tensor,
-            image_size: tuple[int, int] = (256, 256),
-            reducing_size: int = 64
+            image_size: tuple[int, int] = (512, 512),
+            reducing_size: int = 32
     ) -> torch.Tensor:
         """
          Forward pass for the model.
@@ -346,13 +346,13 @@ class AutoEncoder(nn.Module):
         self.encoder_output_size = encoder_output_size
         self.decoder_output_size = decoder_output_size
 
-        self.encoder = Encoder(input_size, encoder_output_size)
-        self.decoder = Decoder(encoder_output_size, decoder_output_size)
+        self.encoder = Encoder(input_size, encoder_output_size).to('cuda')
+        self.decoder = Decoder(encoder_output_size, decoder_output_size).to('cuda')
 
     def forward(
             self, x: torch.Tensor,
-            image_size: tuple[int, int] = (256, 256),
-            reducing_size: int = 64
+            image_size: tuple[int, int] = (512, 512),
+            reducing_size: int = 32
     ) -> torch.Tensor:
         """
         forward method
@@ -425,11 +425,12 @@ class Pretraining:
         """
         for c in range(self.model_to_train.output_size):
             X = []
-            for img in self.train_loader:
+            for _, img in self.train_loader:
                 img = img.to('cuda')
-                output_feature_extractor = adapt_size(self.feature_extractor(img).get('layer2'), outpu_size=self.model_to_train.output_size)  # noqa: E501
-                X.append(output_feature_extractor[:, c, :].flatten().cpu().detach().numpy())  # noqa: E501
-            x = np.array(X).flatten()
+                output_feature_extractor = adapt_size(self.feature_extractor(img).get('layer2'), output_size=self.model_to_train.output_size)  # noqa: E501
+                X.append(output_feature_extractor[:, c, :,:].flatten().cpu().detach().numpy())  # noqa: E501
+            x = np.concatenate([vec.flatten() for vec in X])
+            
             self.mean_feature_extractor_channels.append(np.mean(x))
             self.std_feature_extractor_channels.append(np.std(x))
 
@@ -448,8 +449,8 @@ class Pretraining:
         return_nodes = {
             'layer1': 'layer1',
             'layer2': 'layer2',
-            'layer3': 'layer3',
-            'layer4': 'layer4',
+            # 'layer3': 'layer3',
+            # 'layer4': 'layer4',
         }
 
         fe = create_feature_extractor(pretrained_model, return_nodes=return_nodes)  # noqa: E501
@@ -466,16 +467,16 @@ class Pretraining:
             torch.Tensor: Computed loss for the training step.
         """
         self.optimizer.zero_grad()
-        output_feature_extractor = adapt_size(self.feature_extractor(img).get('layer2'), outpu_size=self.model_to_train.output_size)  # noqa: E501 adapt the size of the feature extraxctor output to the model_to_train output size on the channel dim.
+        output_feature_extractor = adapt_size(self.feature_extractor(img).get('layer2'), output_size=self.model_to_train.output_size)  # noqa: E501 adapt the size of the feature extraxctor output to the model_to_train output size on the channel dim.
         output_feature_extractor = (output_feature_extractor - torch.tensor(self.mean_feature_extractor_channels).to('cuda')) / torch.tensor(self.std_feature_extractor_channels).to('cuda')  # noqa: E501
-        img = adapt_size(img, outpu_size=512, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501 adapt the size of the input image to the model_to_train input size using interpolation on the width and height dims.
+        img = adapt_size(img, output_size=256, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501 adapt the size of the input image to the model_to_train input size using interpolation on the width and height dims.
         outputs_model_to_train = self.model_to_train(img)
         loss = self.criterion(outputs_model_to_train, output_feature_extractor)
         loss.backward()
         self.optimizer.step()
         return loss
 
-    def pretrain(self, epochs: int = 100) -> None:
+    def pretrain(self, epochs: int = 1) -> None:
         """
         Pretrains the model for a specified number of epochs.
         Args:
@@ -485,7 +486,7 @@ class Pretraining:
         """
         for epoch in range(epochs):
             loss_batch = 0.0
-            for img in self.train_loader:
+            for labels,img in self.train_loader:
                 img = img.to('cuda')
                 loss = self.train_step(img)
                 loss_batch += loss.item()

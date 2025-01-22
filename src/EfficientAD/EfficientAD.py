@@ -4,8 +4,8 @@ import numpy as np
 import torchvision
 import torchvision.transforms._functional_pil
 import torchvision.transforms.functional
-from .utils import adapt_size, SIZEADAPTER
-from .models import (
+from utils import adapt_size, SIZEADAPTER
+from models import (
     PatchDescriptionNetworkSmall,
     PatchDescriptionNetworkMedium,
     PDNSIZE,
@@ -13,9 +13,10 @@ from .models import (
     AutoEncoder,
     Pretraining
 )
+from Dataset import DirectoryDataset
 
 
-class EfficientAD(nn.Module):
+class EfficientADClass(nn.Module):
     
     """
     EfficientAD is a neural network model designed for anomaly detection using 
@@ -49,20 +50,20 @@ class EfficientAD(nn.Module):
         if self.PDN_size == PDNSIZE.S:
             self.pdn_student = PatchDescriptionNetworkSmall(
                 self.input_size, PDNTYPES.S
-            )
+            ).to('cuda')
 
             self.pdn_teacher = PatchDescriptionNetworkSmall(
                 self.input_size, PDNTYPES.T
-            )
+            ).to('cuda')
         else:
 
             self.pdn_student = PatchDescriptionNetworkMedium(
                 self.input_size, PDNTYPES.S
-            )  # type: ignore
+            ).to('cuda')  # type: ignore
 
             self.pdn_teacher = PatchDescriptionNetworkMedium(
                 self.input_size, PDNTYPES.T
-            )  # type: ignore
+            ).to('cuda')  # type: ignore
 
         self.auto_encoder = AutoEncoder()
 
@@ -73,15 +74,15 @@ class EfficientAD(nn.Module):
         self.optimizer = torch.optim.Adam(params, lr=0.001, weight_decay=1e-5)  # noqa: E501
         self.criterion = nn.MSELoss()
 
-    def pretrain_teacher(self, train_loader: torch.utils.data.DataLoader) -> None: # noqa: E501
+    def pretrain_teacher(self) -> None:
         """
         Pretrains the teacher PDN model using the given training data.
         Args:
-            train_loader (torch.utils.data.DataLoader): The training data loader. 
+            train_loader (torch.utils.data.DataLoader): The training data loader.
         Returns:
             None
         """
-        pretraining = Pretraining(self.pdn_teacher, train_loader)
+        pretraining = Pretraining(self.pdn_teacher, self.image_net_data_loader)
         pretraining.pretrain()
         self.calculate_teacher_channel_normalization_parameters()
 
@@ -92,9 +93,9 @@ class EfficientAD(nn.Module):
         and collecting the output of a specific layer. It then computes the mean and standard deviation
         for each channel across all images and stores these values in the corresponding attributes.
         """
-        for c in range(self.model_to_train.output_size):
+        for c in range(self.pdn_teacher.output_size):
             X = []
-            for img in self.train_loader:
+            for _, img in self.train_loader:
                 img = img.to('cuda')
                 output_teacher = self.pdn_teacher(img)  # noqa: E501
                 X.append(output_teacher[:, c, :].flatten().cpu().detach().numpy())  # noqa: E501
@@ -110,19 +111,24 @@ class EfficientAD(nn.Module):
         Returns:
             torch.utils.data.DataLoader: A DataLoader containing the selected images.
         """
-        dataset = torchvision.datasets.ImageNet(
-            root='path/to/imagenet',
-            split='train',
-            transform=torchvision.transforms.ToTensor()
+        dataset = DirectoryDataset(
+            img_dir='C:/Users/azd91/Downloads/imagenet-object-localization-challenge/ILSVRC/Data/CLS-LOC/train',
+            ext='jpeg',
+            with_subfolders=True,
+            transforms = torchvision.transforms.Compose([
+                torchvision.transforms.Resize((512, 512)),
+                torchvision.transforms.ToTensor()
+            ]),
         )
         indices = np.random.choice(len(dataset), num_images, replace=False)
         sampler = torch.utils.data.Subset(dataset, indices)
-        loader = torch.utils.data.DataLoader(sampler, batch_size=8, shuffle=True)
+        loader = torch.utils.data.DataLoader(sampler, batch_size=20, shuffle=True)
         return loader
     
     def random_augmentation(self, img: torch.Tensor) -> torch.Tensor:
         """
         Randomly augments the input image tensor.
+
         """
         rand_int = np.random.randint(0, 3)
         sampled_lambda = torch.rand(1).item() * 0.4 + 0.8
@@ -144,18 +150,18 @@ class EfficientAD(nn.Module):
             None
         """
         self.optimizer.zero_grad()
-        img_resized = adapt_size(img, outpu_size=512, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
+        img_resized = adapt_size(img, output_size=512, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
         output_teacher = self.pdn_teacher(img_resized)
         output_teacher = (output_teacher - torch.tensor(self.mean_teacher_channels).to('cuda')) / torch.tensor(self.std_teacher_channels).to('cuda')  # noqa: E501
-        output_student = self.pdn_student(img)
+        output_student = self.pdn_student(img_resized)
         teacher_ae_output_dimension = output_student.shape[1] // 2
         y_students_teacher_part = output_student[:, :teacher_ae_output_dimension, :, :]  # noqa: E501. the student output dimension is equalt ot he output dimension of the teacher plus that of the AE.
         difference_student_teacher = torch.square(y_students_teacher_part - output_teacher)  # noqa: E501
         d_hard = torch.quantile(difference_student_teacher, 0.999)
         l_hard = torch.mean(difference_student_teacher[difference_student_teacher >= d_hard])  # noqa: E501
-        image_net_sample = next(self.image_net_data_loader.generator())
+        _, image_net_sample = next(iter(self.image_net_data_loader))
         l_student_teacher = l_hard + 1/(teacher_ae_output_dimension * output_student.shape[2] * output_student.shape[3]) * torch.sum(torch.square(self.pdn_student(image_net_sample.to('cuda'))))  # noqa: E501
-        augmented_img = self.auto_encoder(img)
+        augmented_img = self.random_augmentation(img_resized)
         output_ae = self.auto_encoder(augmented_img)
         output_teacher_ae = self.pdn_teacher(augmented_img)
         output_teacher_ae = (output_teacher_ae - torch.tensor(self.mean_teacher_channels).to('cuda')) / torch.tensor(self.std_teacher_channels).to('cuda')  # noqa: E501
@@ -220,9 +226,9 @@ class EfficientAD(nn.Module):
         Returns:
             None
         """
-        for epoch in range(70000):
+        for epoch in range(7):
             loss_batch = 0.0
-            for img in self.train_loader:
+            for _, img in self.train_loader:
                 img = img.to('cuda')
                 loss = self.efficientAD_train_step(img)
                 loss_batch += loss.item()
