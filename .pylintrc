@@ -1,0 +1,16 @@
+[FORMAT]
+max-line-length=200
+
+[MESSAGES CONTROL]
+# C0114: Missing module docstring (missing-module-docstring)
+# C0115: Missing class docstring (missing-class-docstring)
+# C0116: Missing function or method docstring (missing-function-docstring)
+# C0209: Formatting a regular string which could be a f-string (consider-using-f-string)
+# R0903: Too few public methods (1/2) (too-few-public-methods)
+# W0613: Unused argument 'XXX' (unused-argument)
+# R0901: Too many ancestors (8/7)
+# W0511: Used when a warning note as FIXME or XXX is detected.
+# W0718: Catching too general exception (broad-exception-caught)
+disable=C0114,C0115,C0116, C0209,R0903,W0613, I1101,R0901,W0511, W0718
+
+generated-members=cv2.*
