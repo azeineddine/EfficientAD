@@ -83,8 +83,12 @@ class EfficientADClass(nn.Module):
             None
         """
         pretraining = Pretraining(self.pdn_teacher, self.image_net_data_loader)
-        pretraining.pretrain()
-        self.calculate_teacher_channel_normalization_parameters()
+        self.pdn_teacher=pretraining.pretrain()
+        #DEL: pretraining object
+        del pretraining
+        self.pdn_teacher.eval()
+        with torch.no_grad():
+            self.calculate_teacher_channel_normalization_parameters()
 
     def calculate_teacher_channel_normalization_parameters(self) -> None:  # noqa: E501   
         """
@@ -93,17 +97,27 @@ class EfficientADClass(nn.Module):
         and collecting the output of a specific layer. It then computes the mean and standard deviation
         for each channel across all images and stores these values in the corresponding attributes.
         """
-        for c in range(self.pdn_teacher.output_size):
-            X = []
-            for _, img in self.train_loader:
-                img = img.to('cuda')
-                output_teacher = self.pdn_teacher(img)  # noqa: E501
-                X.append(output_teacher[:, c, :].flatten().cpu().detach().numpy())  # noqa: E501
-            x = np.array(X).flatten()
-            self.mean_teacher_channels.append(np.mean(x))
-            self.std_teacher_channels.append(np.std(x))
 
-    def get_images_from_image_net_data_loader(self, num_images: int = 20) -> torch.utils.data.DataLoader:  # noqa: E501
+        X = []
+        for _, img in self.train_loader:
+            img = img.to('cuda')
+            output_teacher = self.pdn_teacher(img)  # noqa: E501
+            batch_mean= torch.mean(output_teacher,dim=[0,2,3])
+            X.append(batch_mean.cpu().detach())  # noqa: E501
+        self.mean_teacher_channels = torch.mean(torch.stack(X), dim=0)[None,:,None,None] 
+        mean_diff_list = []
+        for _, img in self.train_loader:
+            img = img.to('cuda')
+            teacher_output = self.pdn_teacher(img)
+            distance = (teacher_output - self.mean_teacher_channels.to('cuda')) ** 2
+            mean_diff = torch.mean(distance, dim=[0, 2, 3])
+            mean_diff_list.append(mean_diff)
+        channel_var = torch.mean(torch.stack(mean_diff_list), dim=0)
+        channel_var = channel_var[None, :, None, None]
+        self.std_teacher_channels = torch.sqrt(channel_var)
+
+
+    def get_images_from_image_net_data_loader(self, num_images: int = 10) -> torch.utils.data.DataLoader:  # noqa: E501
         """
         Selects a specified number of images from the ImageNet dataset.
         Args:
@@ -112,7 +126,7 @@ class EfficientADClass(nn.Module):
             torch.utils.data.DataLoader: A DataLoader containing the selected images.
         """
         dataset = DirectoryDataset(
-            img_dir='C:/Users/azd91/Downloads/imagenet-object-localization-challenge/ILSVRC/Data/CLS-LOC/train',
+            img_dir='C:/Users/DeepHawk/Documents/Abbass_Tests/datasets/image_net/',
             ext='jpeg',
             with_subfolders=True,
             transforms = torchvision.transforms.Compose([
@@ -157,7 +171,7 @@ class EfficientADClass(nn.Module):
         teacher_ae_output_dimension = output_student.shape[1] // 2
         y_students_teacher_part = output_student[:, :teacher_ae_output_dimension, :, :]  # noqa: E501. the student output dimension is equalt ot he output dimension of the teacher plus that of the AE.
         difference_student_teacher = torch.square(y_students_teacher_part - output_teacher)  # noqa: E501
-        d_hard = torch.quantile(difference_student_teacher, 0.999)
+        d_hard =np.quantile(difference_student_teacher.detach().cpu().numpy(), 0.999)
         l_hard = torch.mean(difference_student_teacher[difference_student_teacher >= d_hard])  # noqa: E501
         _, image_net_sample = next(iter(self.image_net_data_loader))
         l_student_teacher = l_hard + 1/(teacher_ae_output_dimension * output_student.shape[2] * output_student.shape[3]) * torch.sum(torch.square(self.pdn_student(image_net_sample.to('cuda'))))  # noqa: E501
@@ -189,12 +203,12 @@ class EfficientADClass(nn.Module):
         self.auto_encoder.eval()
         x_st = []
         x_ae = []
-        for img in self.val_loader:
-            img.to('cuda')
-            img_resized = adapt_size(img, outpu_size=512, by=SIZEADAPTER.INTERPOLATION) # noqa: E501
-            output_teacher = self.pdn_teacher(img_resized)
+        for label, img in self.val_loader:
+            img=img.to('cuda')
+            img_resized = adapt_size(img, output_size=512, by=SIZEADAPTER.INTERPOLATION) # noqa: E501
+            output_teacher = self.pdn_teacher(img_resized.to('cuda'))
             output_teacher = (output_teacher - torch.tensor(self.mean_teacher_channels).to('cuda')) / torch.tensor(self.std_teacher_channels).to('cuda')  # noqa: E501
-            output_student = self.pdn_student(img)
+            output_student = self.pdn_student(img_resized)
             output_ae = self.auto_encoder(img)
             teacher_ae_output_dimension = output_student.shape[1] // 2
             y_students_teacher_part = output_student[:, :teacher_ae_output_dimension, :, :]  # noqa: E501
@@ -203,15 +217,15 @@ class EfficientADClass(nn.Module):
             difference_student_ae = torch.square(output_student_ae - output_ae)
             anomaly_map_st = (1/teacher_ae_output_dimension) * torch.sum(difference_student_teacher, dim=1)  # noqa: E501
             anomaly_map_ae = (1/teacher_ae_output_dimension) * torch.sum(difference_student_ae, dim=1)  # noqa: E501
-            resized_anomaly_map_st = adapt_size(anomaly_map_st, outpu_size=1024, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
-            resized_anomaly_map_ae = adapt_size(anomaly_map_ae, outpu_size=1024, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
+            resized_anomaly_map_st = adapt_size(anomaly_map_st[:,None,...], output_size=1024, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
+            resized_anomaly_map_ae = adapt_size(anomaly_map_ae[:,None,...], output_size=1024, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
             x_st.append(resized_anomaly_map_st)
             x_ae.append(resized_anomaly_map_ae)
 
-        self.q_a_st = torch.quantile(torch.stack(x_st), 0.9)
-        self.q_b_st = torch.quantile(torch.stack(x_st), 0.995)
-        self.q_a_ae = torch.quantile(torch.stack(x_ae), 0.9)
-        self.q_b_ae = torch.quantile(torch.stack(x_ae), 0.995)
+        self.q_a_st = np.quantile(torch.cat(x_st,dim=0).detach().cpu().numpy(), 0.9)
+        self.q_b_st = np.quantile(torch.cat(x_st,dim=0).detach().cpu().numpy(), 0.995)
+        self.q_a_ae = np.quantile(torch.cat(x_ae,dim=0).detach().cpu().numpy(), 0.9)
+        self.q_b_ae = np.quantile(torch.cat(x_ae,dim=0).detach().cpu().numpy(), 0.995)
 
     # pylint: disable=C0103
     def efficientAD_train(self) -> None:
@@ -226,7 +240,7 @@ class EfficientADClass(nn.Module):
         Returns:
             None
         """
-        for epoch in range(7):
+        for epoch in range(150):
             loss_batch = 0.0
             for _, img in self.train_loader:
                 img = img.to('cuda')
@@ -237,12 +251,16 @@ class EfficientADClass(nn.Module):
                 # decay the learning rate to 10-5
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = 1e-5
-        self.efficientAD_eval()
-        print('Finished Training the EfficientAD model!')
         torch.save(self.pdn_student.state_dict(), 'PDN_Student_Weights.pth')
         torch.save(self.pdn_teacher.state_dict(), 'PDN_Teacher_Weights.pth')
         torch.save(self.auto_encoder.state_dict(), 'AutoEncoder_Weights.pth')
-        torch.save(self, 'EfficientAD_Model.pth')
+        torch.save(self.state_dict(), 'EfficientAD_Model.pth')
+        self.efficientAD_eval()
+        print('Finished Training the EfficientAD model!')
+        # torch.save(self.pdn_student.state_dict(), 'PDN_Student_Weights.pth')l
+        # torch.save(self.pdn_teacher.state_dict(), 'PDN_Teacher_Weights.pth')
+        # torch.save(self.auto_encoder.state_dict(), 'AutoEncoder_Weights.pth')
+        # torch.save(self.state_dict(), 'EfficientAD_Model.pth')
     
     def inference(self, img: torch.Tensor) -> torch.Tensor:
         """
@@ -252,11 +270,13 @@ class EfficientADClass(nn.Module):
         Returns:
             torch.Tensor: The output tensor after passing through the EfficientAD model.
         """
-        img.to('cuda')
-        img_resized = adapt_size(img, outpu_size=512, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
-        output_teacher = self.pdn_teacher(img_resized)
-        output_teacher = (output_teacher - torch.tensor(self.mean_teacher_channels).to('cuda')) / torch.tensor(self.std_teacher_channels).to('cuda')  # noqa: E501
-        output_student = self.pdn_student(img)
+        img=torch.Tensor(img)/255.0
+        img=img[None,...].permute(0,3,1,2)
+        img=img.to('cuda')
+        img_resized = adapt_size(img, output_size=512, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
+        output_teacher = self.pdn_teacher(img_resized.to('cuda'))
+        output_teacher = (output_teacher.to('cuda') - torch.tensor(self.mean_teacher_channels.to('cuda'))) / torch.tensor(self.std_teacher_channels.to('cuda'))  # noqa: E501
+        output_student = self.pdn_student(img_resized)
         output_ae = self.auto_encoder(img)
         teacher_ae_output_dimension = output_student.shape[1] // 2
         y_students_teacher_part = output_student[:, :teacher_ae_output_dimension, :, :]  # noqa: E501
@@ -265,8 +285,8 @@ class EfficientADClass(nn.Module):
         difference_student_ae = torch.square(output_student_ae - output_ae)
         anomaly_map_st = (1/teacher_ae_output_dimension) * torch.sum(difference_student_teacher, dim=1)  # noqa: E501
         anomaly_map_ae = (1/teacher_ae_output_dimension) * torch.sum(difference_student_ae, dim=1)  # noqa: E501
-        resized_anomaly_map_st = adapt_size(anomaly_map_st, outpu_size=1024, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
-        resized_anomaly_map_ae = adapt_size(anomaly_map_ae, outpu_size=1024, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
+        resized_anomaly_map_st = adapt_size(anomaly_map_st[None,...], output_size=1024, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
+        resized_anomaly_map_ae = adapt_size(anomaly_map_ae[None,...], output_size=1024, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501
         resized_anomaly_map_st = 0.1 * (resized_anomaly_map_st - self.q_a_st) / (self.q_b_st - self.q_a_st)  # noqa: E501
         resized_anomaly_map_ae = 0.1 * (resized_anomaly_map_ae - self.q_a_ae) / (self.q_b_ae - self.q_a_ae)  # noqa: E501
         anomaly_map = 0.5 * resized_anomaly_map_st + 0.5 * resized_anomaly_map_ae  # noqa: E501

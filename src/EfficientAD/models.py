@@ -404,16 +404,17 @@ class Pretraining:
         # pylint: disable=E1121
         self.pretrained_model = torchvision.models.wide_resnet101_2('Wide_ResNet101_2_Weights.IMAGENET1K_V2').to('cuda')  # noqa: E501
         self. feature_extractor = self.get_feature_extractor(self.pretrained_model)  # noqa: E501
+        ##Del: pretrained model
+        del self.pretrained_model
         self.model_to_train = model_to_train
         self.model_to_train.train()
-        # self.pretrained_model.eval()
-        for param in self.pretrained_model.parameters():
+        for param in self.feature_extractor.parameters():
             param.requires_grad = False
         self.train_loader = train_loader
         self.mean_feature_extractor_channels: list[int] = []
         self.std_feature_extractor_channels: list[int] = []
         self.calculate_feature_extractor_channel_normalization_parameters()
-        self.optimizer = torch.optim.Adam(self.model_to_train.parameters(), lr=0.001)  # noqa: E501
+        self.optimizer = torch.optim.Adam(self.model_to_train.parameters(), lr=0.0001)  # noqa: E501
         self.criterion = nn.MSELoss()
 
     def calculate_feature_extractor_channel_normalization_parameters(self) -> None:  # noqa: E501   
@@ -423,16 +424,25 @@ class Pretraining:
         and collecting the output of a specific layer. It then computes the mean and standard deviation
         for each channel across all images and stores these values in the corresponding attributes.
         """
-        for c in range(self.model_to_train.output_size):
-            X = []
-            for _, img in self.train_loader:
-                img = img.to('cuda')
-                output_feature_extractor = adapt_size(self.feature_extractor(img).get('layer2'), output_size=self.model_to_train.output_size)  # noqa: E501
-                X.append(output_feature_extractor[:, c, :,:].flatten().cpu().detach().numpy())  # noqa: E501
-            x = np.concatenate([vec.flatten() for vec in X])
-            
-            self.mean_feature_extractor_channels.append(np.mean(x))
-            self.std_feature_extractor_channels.append(np.std(x))
+        X = []
+        for _, img in self.train_loader:
+            img = img.to('cuda')
+            output_feature_extractor = adapt_size(self.feature_extractor(img).get('layer2'), output_size=self.model_to_train.output_size)  # noqa: E501
+            batch_mean= torch.mean(output_feature_extractor,dim=[0,2,3])
+            X.append(batch_mean.cpu().detach())  # noqa: E501
+        self.mean_feature_extractor_channels = torch.mean(torch.stack(X), dim=0)[None,:,None,None] 
+        
+        mean_diff_list = []
+        for _, img in self.train_loader:
+            img = img.to('cuda')
+            output_feature_extractor = adapt_size(self.feature_extractor(img).get('layer2'), output_size=self.model_to_train.output_size)  # noqa: E501
+            distance = (output_feature_extractor - self.mean_feature_extractor_channels.to('cuda')) ** 2
+            mean_diff = torch.mean(distance, dim=[0, 2, 3])
+            mean_diff_list.append(mean_diff)
+        channel_var = torch.mean(torch.stack(mean_diff_list), dim=0)
+        channel_var = channel_var[None, :, None, None]
+        self.std_feature_extractor_channels = torch.sqrt(channel_var)
+
 
     def get_feature_extractor(
             self,
@@ -454,7 +464,7 @@ class Pretraining:
         }
 
         fe = create_feature_extractor(pretrained_model, return_nodes=return_nodes)  # noqa: E501
-        return fe
+        return copy.deepcopy(fe)
 
     def train_step(self, img) -> torch.Tensor:
         """
@@ -469,6 +479,8 @@ class Pretraining:
         self.optimizer.zero_grad()
         output_feature_extractor = adapt_size(self.feature_extractor(img).get('layer2'), output_size=self.model_to_train.output_size)  # noqa: E501 adapt the size of the feature extraxctor output to the model_to_train output size on the channel dim.
         output_feature_extractor = (output_feature_extractor - torch.tensor(self.mean_feature_extractor_channels).to('cuda')) / torch.tensor(self.std_feature_extractor_channels).to('cuda')  # noqa: E501
+        #put back the mean and std into cpu
+
         img = adapt_size(img, output_size=256, by=SIZEADAPTER.INTERPOLATION)  # noqa: E501 adapt the size of the input image to the model_to_train input size using interpolation on the width and height dims.
         outputs_model_to_train = self.model_to_train(img)
         loss = self.criterion(outputs_model_to_train, output_feature_extractor)
@@ -476,7 +488,7 @@ class Pretraining:
         self.optimizer.step()
         return loss
 
-    def pretrain(self, epochs: int = 1) -> None:
+    def pretrain(self, epochs: int = 1000) -> None:
         """
         Pretrains the model for a specified number of epochs.
         Args:
@@ -484,6 +496,7 @@ class Pretraining:
         Returns:
             None
         """
+        self.model_to_train.train()
         for epoch in range(epochs):
             loss_batch = 0.0
             for labels,img in self.train_loader:
@@ -493,3 +506,4 @@ class Pretraining:
                 print(f'epoch: {epoch}, loss: {loss.item()}')
         print('Finished Training the PDN Teacher model!')
         torch.save(self.model_to_train.state_dict(), 'PDN_Teacher_Weights.pth')
+        return copy.deepcopy(self.model_to_train)
